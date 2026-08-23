@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -1109,3 +1111,55 @@ class TestIsGenerated:
         p = tmp_path / "api_pb2.py"
         p.write_text("x = 1\n")
         assert _is_generated(p) is True
+
+
+class TestConcurrentLazyInit:
+    """The lazy scans behind ``_build_file_info`` run once, not once per worker.
+
+    ``build_repo_graph`` maps ``_build_file_info`` over every path with ~2x
+    cpu_count workers, so an unsynchronised ``is None`` check is not a wasted
+    branch — it is one full repo walk per worker that wins the race.
+    """
+
+    def test_console_script_tables_is_collected_once(self, tmp_path: Path) -> None:
+        calls = 0
+        real = traverser_mod._collect_console_scripts
+
+        def counting(repo_root, **kwargs):
+            nonlocal calls
+            calls += 1
+            # Widen the window a real walk would occupy, so an unsynchronised
+            # implementation reliably loses the race instead of flaking.
+            time.sleep(0.05)
+            return real(repo_root, **kwargs)
+
+        traverser_mod._collect_console_scripts = counting
+        try:
+            tv = FileTraverser(tmp_path)
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                results = list(pool.map(lambda _: tv._console_script_tables(), range(16)))
+        finally:
+            traverser_mod._collect_console_scripts = real
+
+        assert calls == 1
+        # Every caller sees the one published object, not a private copy.
+        assert all(r is results[0] for r in results)
+
+    def test_dir_ignore_cache_publishes_one_spec_per_directory(self, tmp_path: Path) -> None:
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / ".gitignore").write_text("build/\n", encoding="utf-8")
+        tv = FileTraverser(tmp_path)
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            specs = list(pool.map(lambda _: tv._get_dir_ignore(tmp_path / "pkg"), range(16)))
+
+        assert all(s is specs[0] for s in specs)
+
+    def test_pre_seeded_root_entry_survives_concurrent_readers(self, tmp_path: Path) -> None:
+        tv = FileTraverser(tmp_path)
+        seeded = tv._dir_ignore_cache[str(tmp_path)]
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda _: tv._get_dir_ignore(tmp_path), range(8)))
+
+        assert tv._dir_ignore_cache[str(tmp_path)] is seeded
