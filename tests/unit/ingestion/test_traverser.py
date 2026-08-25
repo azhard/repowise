@@ -1166,6 +1166,11 @@ class TestConcurrentLazyInit:
         assert tv._dir_ignore_cache[str(tmp_path)] is seeded
 
 
+def _never_pruned(_rel_dir: Path) -> bool:
+    """The old helpers applied no ignore layer; this is that, spelled out."""
+    return False
+
+
 class TestPackageScanPruning:
     """The package scan answers from the files traversal actually indexes.
 
@@ -1194,7 +1199,7 @@ class TestPackageScanPruning:
         tv = FileTraverser(tmp_path)
         assert not any("/out/" in fi.path for fi in tv.traverse())
 
-        unpruned, _ = _scan_package_dir(pkg, tmp_path, is_pruned=None)
+        unpruned, _ = _scan_package_dir(pkg, tmp_path, is_pruned=_never_pruned)
         pruned, _ = _scan_package_dir(pkg, tmp_path, is_pruned=tv.dir_chain_skipped)
         assert unpruned == "javascript"
         assert pruned == "typescript"
@@ -1207,7 +1212,7 @@ class TestPackageScanPruning:
         (pkg / "index.html").write_text("<html></html>\n", encoding="utf-8")
 
         tv = FileTraverser(tmp_path)
-        _, unpruned = _scan_package_dir(pkg, tmp_path, is_pruned=None)
+        _, unpruned = _scan_package_dir(pkg, tmp_path, is_pruned=_never_pruned)
         _, pruned = _scan_package_dir(pkg, tmp_path, is_pruned=tv.dir_chain_skipped)
 
         assert "pkg/out/index.html" in unpruned
@@ -1226,7 +1231,7 @@ class TestPackageScanPruning:
         tv = FileTraverser(tmp_path)
         assert not any("/dist/" in fi.path for fi in tv.traverse())
 
-        unpruned, _ = _scan_package_dir(pkg, tmp_path, is_pruned=None)
+        unpruned, _ = _scan_package_dir(pkg, tmp_path, is_pruned=_never_pruned)
         pruned, _ = _scan_package_dir(pkg, tmp_path, is_pruned=tv.dir_chain_skipped)
         assert unpruned == "javascript"
         assert pruned == "typescript"

@@ -1196,7 +1196,7 @@ def _scan_package_dir(
     repo_root: Path,
     *,
     prune_nested_git: bool = True,
-    is_pruned: Callable[[Path], bool] | None = None,
+    is_pruned: Callable[[Path], bool],
 ) -> tuple[LanguageTag, list[str]]:
     """Primary language and entry-point paths for one package, in one walk.
 
@@ -1206,7 +1206,9 @@ def _scan_package_dir(
     largest thing in the repo.
 
     ``is_pruned`` is the ignore-file layer :func:`~.package_roots.
-    scan_package_roots` already applies, and it matters more here than there.
+    scan_package_roots` already applies, required rather than optional because
+    a scan that skips it answers from files nothing indexes. It matters more
+    here than it does there.
     :func:`~repowise.core.fs_walk.walk_repo` skips vendored trees and nested
     checkouts but not gitignored ones, so without it this descends into build
     output — and unlike a manifest scan, which only matches filenames, language
@@ -1226,12 +1228,11 @@ def _scan_package_dir(
         for dirpath, dirnames, filenames in walk_repo(
             directory, prune_nested_git=prune_nested_git
         ):
-            if is_pruned is not None:
-                # Prune in place so the walk never descends, matching
-                # scan_package_roots. Candidates are repo-relative because
-                # dir_chain_skipped tests each level against the repo root.
-                rel_dir = dirpath.relative_to(repo_root)
-                dirnames[:] = [d for d in dirnames if not is_pruned(rel_dir / d)]
+            # Prune in place so the walk never descends, matching
+            # scan_package_roots. Candidates are repo-relative because
+            # dir_chain_skipped tests each level against the repo root.
+            rel_dir = dirpath.relative_to(repo_root)
+            dirnames[:] = [d for d in dirnames if not is_pruned(rel_dir / d)]
             for fname in filenames:
                 if fname in _ENTRY_POINT_NAMES:
                     entry_points.append((dirpath / fname).relative_to(repo_root).as_posix())
