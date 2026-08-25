@@ -14,6 +14,7 @@ from repowise.core.ingestion.traverser import (
     _compile_gitignore,
     _detect_language,
     _is_generated,
+    _scan_package_dir,
 )
 
 
@@ -1163,3 +1164,76 @@ class TestConcurrentLazyInit:
             list(pool.map(lambda _: tv._get_dir_ignore(tmp_path), range(8)))
 
         assert tv._dir_ignore_cache[str(tmp_path)] is seeded
+
+
+class TestPackageScanPruning:
+    """The package scan answers from the files traversal actually indexes.
+
+    ``_scan_package_dir`` reads a package's primary language and its entry
+    points off one walk. Without the traverser's own boundary test it reads
+    them off directories that are never indexed, so a package could be
+    described entirely by files absent from the index.
+    """
+
+    def _pkg(self, tmp_path: Path, gitignore: str) -> Path:
+        (tmp_path / ".gitignore").write_text(gitignore, encoding="utf-8")
+        pkg = tmp_path / "pkg"
+        (pkg / "src").mkdir(parents=True)
+        (pkg / "package.json").write_text('{"name": "p"}', encoding="utf-8")
+        (pkg / "src" / "index.ts").write_text("export const a = 1;\n", encoding="utf-8")
+        return pkg
+
+    def test_gitignored_output_no_longer_decides_the_language(self, tmp_path: Path) -> None:
+        pkg = self._pkg(tmp_path, "pkg/out/\n")
+        out = pkg / "out"
+        out.mkdir()
+        # Enough generated JS to outvote the single real source.
+        for i in range(5):
+            (out / f"chunk{i}.js").write_text("var a=1;\n", encoding="utf-8")
+
+        tv = FileTraverser(tmp_path)
+        assert not any("/out/" in fi.path for fi in tv.traverse())
+
+        unpruned, _ = _scan_package_dir(pkg, tmp_path, is_pruned=None)
+        pruned, _ = _scan_package_dir(pkg, tmp_path, is_pruned=tv.dir_chain_skipped)
+        assert unpruned == "javascript"
+        assert pruned == "typescript"
+
+    def test_entry_points_come_only_from_indexed_directories(self, tmp_path: Path) -> None:
+        pkg = self._pkg(tmp_path, "pkg/out/\n")
+        out = pkg / "out"
+        out.mkdir()
+        (out / "index.html").write_text("<html></html>\n", encoding="utf-8")
+        (pkg / "index.html").write_text("<html></html>\n", encoding="utf-8")
+
+        tv = FileTraverser(tmp_path)
+        _, unpruned = _scan_package_dir(pkg, tmp_path, is_pruned=None)
+        _, pruned = _scan_package_dir(pkg, tmp_path, is_pruned=tv.dir_chain_skipped)
+
+        assert "pkg/out/index.html" in unpruned
+        assert "pkg/out/index.html" not in pruned
+        assert "pkg/index.html" in pruned
+
+    def test_a_committed_build_dir_is_excluded_too(self, tmp_path: Path) -> None:
+        """Not just gitignored trees. ``dist`` is in ``_BLOCKED_DIRS``, so the
+        traverser never indexes it even when it is committed — and a directory
+        nothing indexes must not name the package's language."""
+        pkg = self._pkg(tmp_path, "node_modules/\n")  # dist/ deliberately tracked
+        dist = pkg / "dist"
+        dist.mkdir()
+        (dist / "bundle.js").write_text("var a=1;\n", encoding="utf-8")
+
+        tv = FileTraverser(tmp_path)
+        assert not any("/dist/" in fi.path for fi in tv.traverse())
+
+        unpruned, _ = _scan_package_dir(pkg, tmp_path, is_pruned=None)
+        pruned, _ = _scan_package_dir(pkg, tmp_path, is_pruned=tv.dir_chain_skipped)
+        assert unpruned == "javascript"
+        assert pruned == "typescript"
+
+    def test_a_package_with_nothing_indexed_reports_unknown(self, tmp_path: Path) -> None:
+        """The one shape where the answer gets smaller rather than sharper."""
+        pkg = self._pkg(tmp_path, "pkg/src/\n")
+        tv = FileTraverser(tmp_path)
+        language, _ = _scan_package_dir(pkg, tmp_path, is_pruned=tv.dir_chain_skipped)
+        assert language == "unknown"
