@@ -1226,7 +1226,12 @@ class TestPackageScanPruning:
         pkg = self._pkg(tmp_path, "node_modules/\n")  # dist/ deliberately tracked
         dist = pkg / "dist"
         dist.mkdir()
-        (dist / "bundle.js").write_text("var a=1;\n", encoding="utf-8")
+        # Outnumber the one real source rather than tie with it: `walk_repo`
+        # does not sort dirnames, so on a tie `max(counts, key=...)` returns
+        # whichever language the filesystem happened to yield first. That made
+        # this pass locally and fail on CI.
+        for i in range(5):
+            (dist / f"chunk{i}.js").write_text("var a=1;\n", encoding="utf-8")
 
         tv = FileTraverser(tmp_path)
         assert not any("/dist/" in fi.path for fi in tv.traverse())
