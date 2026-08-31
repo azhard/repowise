@@ -59,6 +59,57 @@ def _is_stub_fallback_row(page) -> bool:
     return isinstance(meta, dict) and STUB_FALLBACK_ERROR in meta
 
 
+
+async def _page_count(session: object, repo_id: str) -> int:
+    """Count this repository's pages in SQL.
+
+    Counted in the database rather than by measuring a fetched list. The
+    previous spelling took ``len()`` of a ``list_pages`` page, whose ``limit``
+    defaults to 100 and was passed 10000 here, so every repository with more
+    than 10000 pages reported exactly 10000 — a plausible-looking number that
+    never moves.
+    """
+    from sqlalchemy import func, select
+
+    from repowise.core.persistence.models import Page
+
+    result = await session.execute(  # type: ignore[attr-defined]
+        select(func.count()).select_from(Page).where(Page.repository_id == repo_id)
+    )
+    return int(result.scalar_one())
+
+
+async def _all_pages_for_reconciliation(session: object, repo_id: str) -> list:
+    """Every page this repository has, for reconciling against the indexes.
+
+    The reconciliation asks which store entries have no page behind them, so
+    anything it cannot see it calls an orphan. It read the pages through
+    ``list_pages(limit=10000)`` — a paginated listing helper whose ``limit``
+    defaults to 100 — and treated that page-one result as the whole database.
+    Every page past the 10000th was therefore invisible, and each one turned
+    its vector and FTS row into a phantom orphan: on a 18900-page repository,
+    8900 of them. ``--repair`` deletes what this reports, so what it removed
+    was the live index.
+
+    Three columns rather than whole rows: the id to match against the stores,
+    the content for the information floor, and metadata_json for the stub
+    predicate. Nothing downstream reads any other field, and hydrating full
+    ORM objects for every page only to discard them is what made a cap look
+    necessary in the first place.
+    """
+    from sqlalchemy import select
+
+    from repowise.core.persistence.models import Page
+
+    result = await session.execute(  # type: ignore[attr-defined]
+        select(Page.id, Page.content, Page.metadata_json).where(
+            Page.repository_id == repo_id
+        )
+    )
+    return list(result.all())
+
+
+
 def _run_repo_checks(
     repo_path: _DoctorPath, repair: bool, *, fmt: str = "table"
 ) -> tuple[bool, list[DoctorCheck]]:
@@ -99,7 +150,6 @@ def _run_repo_checks(
                     create_session_factory,
                     get_repository_by_path,
                     get_session,
-                    list_pages,
                 )
 
                 url = get_db_url_for_repo(repo_path)
@@ -112,8 +162,7 @@ def _run_repo_checks(
                 async with get_session(sf) as session:
                     repo = await get_repository_by_path(session, str(repo_path))
                     if repo:
-                        pages = await list_pages(session, repo.id, limit=10000)
-                        count = len(pages)
+                        count = await _page_count(session, repo.id)
                 await engine.dispose()
                 return count
 
@@ -251,7 +300,6 @@ def _run_repo_checks(
                     create_session_factory,
                     get_repository_by_path,
                     get_session,
-                    list_pages,
                 )
                 from repowise.core.persistence.information_floor import (
                     meets_information_floor,
@@ -272,7 +320,8 @@ def _run_repo_checks(
                     if not repo:
                         await engine.dispose()
                         return set(), set(), set(), set()
-                    pages = await list_pages(session, repo.id, limit=10000)
+                    pages = await _all_pages_for_reconciliation(session, repo.id)
+                    sql_ids = {p.id for p in pages}
                     # ``Page``'s primary key is the column ``id``; there is no
                     # ``page_id`` attribute. The old spelling raised here on
                     # every run, was swallowed below, and left both store
@@ -280,7 +329,7 @@ def _run_repo_checks(
                     # drift was ever detected and --repair never had anything
                     # to repair. The FTS repair block had the same defect and
                     # was fixed; this half was missed.
-                    sql_ids = {p.id for p in pages}
+
                     # The page vector store also holds decision embeddings under
                     # the "decision:<id>" namespace, so they belong on the SQL
                     # side of the ORPHAN check (but NOT FTS, which only indexes
