@@ -160,3 +160,49 @@ async def test_reindex_aborts_when_every_item_failed(
 
     with pytest.raises(click.Abort):
         await reindex_cmd._reindex(tmp_path, "openai", batch_size=20)
+
+
+async def test_reindex_auto_honours_the_repo_pinned_embedder(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """`--embedder auto` must read config.yaml's pin, not just the environment.
+
+    The pin is what wrote the vector table, so it is what must rewrite it. When
+    `auto` resolved from env vars alone, a repo pinned to one embedder in a
+    shell exporting another provider's key had its table rewritten by that other
+    provider, leaving every reader — which does honour the pin — querying
+    vectors of the wrong width.
+    """
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'wiki.db'}"
+    (tmp_path / ".repowise").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".repowise" / "config.yaml").write_text(
+        "embedder: ollama\n", encoding="utf-8"
+    )
+
+    built: dict[str, str] = {}
+
+    def fake_build_embedder(name: str, _repo_path: object):
+        built["name"] = name
+        raise click.Abort()
+
+    # REPOWISE_EMBEDDER legitimately outranks the pin, so a test about pin
+    # precedence has to clear it or it is asserting the wrong rule. It is also
+    # genuinely leaked into this process by
+    # test_embedder_resolution.py::test_the_reader_prefers_the_repo_pin, whose
+    # `monkeypatch.delenv(..., raising=False)` records nothing when the variable
+    # is already absent — so the value the production code then sets has no
+    # saved state to restore and survives into later tests.
+    monkeypatch.delenv("REPOWISE_EMBEDDER", raising=False)
+    # An unrelated provider key exported in the environment. Before the fix this
+    # is what `auto` resolved to, silently overriding the repo's own pin.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(reindex_cmd, "get_db_url_for_repo", lambda _repo_path: db_url)
+    monkeypatch.setattr(
+        "repowise.cli.providers.embedders.build_embedder", fake_build_embedder
+    )
+
+    with pytest.raises(click.Abort):
+        await reindex_cmd._reindex(tmp_path, "auto", batch_size=20)
+
+    assert built["name"] == "ollama"
