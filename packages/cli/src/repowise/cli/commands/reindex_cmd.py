@@ -54,7 +54,6 @@ async def _reindex(repo_path, embedder_name: str, batch_size: int) -> None:
     from repowise.core.providers.embedding.base import MockEmbedder
 
     # --- Resolve embedder ---
-    requested_embedder = embedder_name
     if embedder_name == "auto":
         # Resolve through the repo, not the environment. `_resolve_embedder(None)`
         # reads REPOWISE_EMBEDDER and API keys only, so `auto` never saw the
@@ -68,7 +67,13 @@ async def _reindex(repo_path, embedder_name: str, batch_size: int) -> None:
         embedder_name = resolve_embedder_for_repo(repo_path)
 
     embedder_impl = build_embedder(embedder_name, repo_path)
-    if isinstance(embedder_impl, MockEmbedder) and requested_embedder != "mock":
+    # Guard on the RESOLVED name, not the flag. `mock` reached here two ways:
+    # asked for, or fallen back to because nothing else was configured. Only the
+    # second is an error. Now that `auto` reads the pin, `embedder: mock` in
+    # config.yaml is a third way, and it is as deliberate as passing the flag —
+    # comparing against `requested_embedder` would abort a repo that is pinned
+    # to mock on purpose.
+    if isinstance(embedder_impl, MockEmbedder) and embedder_name != "mock":
         console.print(
             "[red]No real embedder available. Set a real embedder key, configure Ollama, or pass --embedder mock for test vectors.[/red]"
         )

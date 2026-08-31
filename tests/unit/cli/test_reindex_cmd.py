@@ -206,3 +206,36 @@ async def test_reindex_auto_honours_the_repo_pinned_embedder(
         await reindex_cmd._reindex(tmp_path, "auto", batch_size=20)
 
     assert built["name"] == "ollama"
+
+
+async def test_reindex_does_not_abort_on_a_deliberately_pinned_mock_embedder(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """`embedder: mock` in config.yaml is a choice, not a missing embedder.
+
+    The abort exists for the fallback case — nothing configured, so build_embedder
+    quietly hands back a MockEmbedder and a real reindex would write meaningless
+    vectors. A repo that pins mock has said what it wants, the same as passing
+    --embedder mock, and must not be treated as unconfigured.
+    """
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'wiki.db'}"
+    (tmp_path / ".repowise").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".repowise" / "config.yaml").write_text(
+        "embedder: mock\n", encoding="utf-8"
+    )
+
+    monkeypatch.delenv("REPOWISE_EMBEDDER", raising=False)
+    monkeypatch.setattr(reindex_cmd, "get_db_url_for_repo", lambda _repo_path: db_url)
+    monkeypatch.setattr(
+        "repowise.core.persistence.database.create_engine", lambda _url: _DummyEngine()
+    )
+
+    async def fake_init_db(_engine: object) -> None:
+        return None
+
+    monkeypatch.setattr("repowise.core.persistence.database.init_db", fake_init_db)
+    monkeypatch.setattr("sqlalchemy.ext.asyncio.async_sessionmaker", _sessionmaker)
+
+    # No Abort: reaches the normal empty-database path and returns.
+    await reindex_cmd._reindex(tmp_path, "auto", batch_size=20)
