@@ -449,8 +449,13 @@ def _run_repo_checks(
             # Held-back stubs are not drift, but they are also not nothing: the
             # wiki has a page there that no model wrote. Say so on the same row
             # rather than letting "in sync" imply the wiki is complete.
+            # Name the command, not just the flag. `--resume` exists only on
+            # `init`, so a reader who takes this advice tries `generate
+            # --resume` first — 0.48.0 answers "No such option '--resume'. Did
+            # you mean '--yes'?" — and has to guess which command was meant. A
+            # health report is the worst place to make someone guess.
             if stub_count:
-                vec_detail += f" · {stub_count} stub(s) awaiting --resume"
+                vec_detail += f" · {stub_count} stub(s) awaiting `repowise init --resume`"
             checks.append(_check("SQL ↔ Vector Store", vec_ok, vec_detail))
 
             fts_ok = not missing_from_fts and not orphaned_fts
